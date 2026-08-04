@@ -2,3 +2,6 @@ node_modules/
 *.log
 .DS_Store
 .env
+
+# Local maintenance tooling — not part of the package
+*.local.py
