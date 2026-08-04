@@ -1,5 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <path d="M32 3 55 16v32L32 61 9 48V16z" fill="#ffd24a"/>
-  <path d="M32 3v58L9 48V16z" fill="#e8b52e"/>
-  <path d="M22 22h20l-13 9h13v4H22l13-9H22z" fill="#111"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Buzz relay">
+  <rect x="4" y="9" width="56" height="37" rx="9" fill="#8b7ff0"/>
+  <path d="M17 44h15L16 57z" fill="#8b7ff0"/>
+  <rect x="14" y="20" width="34" height="4.5" rx="2.25" fill="#14121f" opacity=".92"/>
+  <rect x="14" y="29" width="23" height="4.5" rx="2.25" fill="#14121f" opacity=".65"/>
+  <circle cx="52" cy="13" r="7.5" fill="#2fe0aa" stroke="#14121f" stroke-width="2.5"/>
 </svg>

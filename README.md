@@ -116,8 +116,12 @@ live relay behaviour — verify those against a real relay.
 
 ## Icons
 
-`buzz.svg` / `buzz.dark.svg` are original artwork for this package. They are **not** Block's
-Buzz mark, and this project is not affiliated with Block, Inc.
+`buzz.svg` / `buzz.dark.svg` were drawn for this package: a message bubble with a status dot,
+in indigo. They share no shape or colour value with Block's Buzz mark (a bee, built from
+circles and ellipses in `#d7d72e`) or with any other Buzz-related package.
+
+This project is **not affiliated with, endorsed by, or connected to Block, Inc.** "Buzz" is
+their product name, used here only to say what this node talks to.
 
 ## License
 
