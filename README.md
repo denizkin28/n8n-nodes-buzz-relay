@@ -1,6 +1,6 @@
 # n8n-nodes-buzz-relay
 
-A custom [n8n](https://n8n.io) node for **[Buzz](https://github.com/block/buzz)** — Block's
+A custom [n8n](https://github.com/n8n-io/n8n) node for **[Buzz](https://github.com/block/buzz)** — Block's
 Nostr-based team chat — covering messages, threads, reactions, channels, users, presence, files
 and canvases, plus a realtime trigger.
 
@@ -145,6 +145,13 @@ circles and ellipses in `#d7d72e`) or with any other Buzz-related package.
 
 This project is **not affiliated with, endorsed by, or connected to Block, Inc.** "Buzz" is
 their product name, used here only to say what this node talks to.
+
+## Related projects
+
+- **n8n** — <https://github.com/n8n-io/n8n> (self-hosted workflow automation)
+- **Buzz** — <https://github.com/block/buzz> (the relay and desktop client this talks to)
+
+Neither project is affiliated with this one.
 
 ## License
 
