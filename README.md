@@ -1,28 +1,51 @@
 # n8n-nodes-buzz-relay
 
-An [n8n](https://n8n.io) community node for **[Buzz](https://github.com/block/buzz)** — Block's
+A custom [n8n](https://n8n.io) node for **[Buzz](https://github.com/block/buzz)** — Block's
 Nostr-based team chat — covering messages, threads, reactions, channels, users, presence, files
 and canvases, plus a realtime trigger.
 
-Works against a **hosted** Buzz community or a **self-hosted** relay.
-
 > **Not affiliated with Block, Inc.** "Buzz" is their product; this is an independent client.
+
+## What this is
+
+A **custom node for self-hosted n8n**, talking to a **Buzz relay** — either a hosted Buzz
+community or a relay you run yourself.
+
+It is **not** published as an n8n "community node" and is not on npm. You install it by putting
+it in n8n's custom-nodes directory, which means:
+
+- **Self-hosted n8n only.** n8n Cloud cannot load custom nodes.
+- **Node 22+** — the trigger's realtime mode uses the global `WebSocket`, unavailable unflagged
+  before Node 22. On older runtimes set the trigger's **Connection Mode** to *Polling*; the rest
+  of the node is unaffected.
 
 ## Install
 
-**n8n UI** — Settings → Community nodes → Install → `n8n-nodes-buzz-relay`
-
-**Self-hosted, manually:**
+Drop it into n8n's custom-nodes directory and restart. The directory is
+`<n8n data dir>/custom/node_modules/<package>` — `~/.n8n/custom/node_modules/` for a default
+install.
 
 ```bash
-cd ~/.n8n/custom          # create it if it does not exist
-npm install n8n-nodes-buzz-relay
+mkdir -p ~/.n8n/custom/node_modules
+cd ~/.n8n/custom/node_modules
+git clone https://github.com/denizkin28/n8n-nodes-buzz-relay.git
+cd n8n-nodes-buzz-relay && npm install --omit=dev
 # restart n8n
 ```
 
-**Requires Node 22+.** The trigger's realtime mode uses the global `WebSocket`, which is not
-available unflagged before Node 22. On older runtimes everything else still works — set the
-trigger's **Connection Mode** to *Polling*.
+**Docker.** The same path applies *inside* the container, so bind-mount a host directory at the
+n8n data dir and place the package under `custom/node_modules/` there — no custom image needed,
+and image digest pins stay intact:
+
+```yaml
+volumes:
+  - ./data:/home/node/.n8n        # package lives in ./data/custom/node_modules/<package>
+```
+
+Custom nodes load in n8n's **main** process, so a change needs the **n8n** container restarted
+(restarting a task-runner container is not enough).
+
+Verify it loaded: the **Buzz** and **Buzz Trigger** nodes appear in the node panel.
 
 ## Credential — Buzz API
 
@@ -107,7 +130,7 @@ otherwise look like bugs in this node.
 
 ```bash
 npm install
-npm test        # ~50 checks, no network or relay required
+npm test        # 72 checks, no network or relay required
 ```
 
 Tests cover the SSRF guard, pagination, event-id uniqueness, response shaping and the profile
