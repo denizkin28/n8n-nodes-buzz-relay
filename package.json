@@ -4,16 +4,16 @@
   "description": "n8n community node for Buzz (Nostr) relays \u2014 messages, threads, reactions, channels, users, presence, files and canvases, plus a realtime trigger",
   "license": "MIT",
   "author": {
-    "name": "TODO your name",
-    "url": "https://github.com/TODO"
+    "name": "denizkin",
+    "url": "https://github.com/denizkin28"
   },
-  "homepage": "https://github.com/TODO/n8n-nodes-buzz-relay#readme",
+  "homepage": "https://github.com/denizkin28/n8n-nodes-buzz-relay#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/TODO/n8n-nodes-buzz-relay.git"
+    "url": "git+https://github.com/denizkin28/n8n-nodes-buzz-relay.git"
   },
   "bugs": {
-    "url": "https://github.com/TODO/n8n-nodes-buzz-relay/issues"
+    "url": "https://github.com/denizkin28/n8n-nodes-buzz-relay/issues"
   },
   "keywords": [
     "n8n-community-node-package",
