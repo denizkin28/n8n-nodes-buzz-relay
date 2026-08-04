@@ -1,6 +1,6 @@
 # n8n-nodes-buzz-relay
 
-A custom [n8n](https://github.com/n8n-io/n8n) node for **[Buzz](https://github.com/block/buzz)** — Block's
+**Unofficial.** A custom [n8n](https://github.com/n8n-io/n8n) node for **[Buzz](https://github.com/block/buzz)** — Block's
 Nostr-based team chat — covering messages, threads, reactions, channels, users, presence, files
 and canvases, plus a realtime trigger.
 
