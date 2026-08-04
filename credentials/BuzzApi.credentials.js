@@ -25,6 +25,16 @@ class BuzzApi {
 				description:
 					'The bot identity\'s Nostr secret key, as nsec or 64-char hex. Its pubkey must already be a member of the community, or the relay rejects every request with relay_membership_required.',
 			},
+			{
+				displayName: 'NIP-OA Auth Tag',
+				name: 'authTag',
+				type: 'string',
+				typeOptions: { password: true },
+				default: '',
+				placeholder: '["auth","<owner-pubkey-hex>","<conditions>","<sig-hex>"]',
+				description:
+					'Optional. A NIP-OA delegated-agent auth tag, proving this identity acts on behalf of an owner. Attached to every event this node publishes. Leave empty for an ordinary member key.',
+			},
 		];
 	}
 }

@@ -28,8 +28,9 @@ trigger's **Connection Mode** to *Polling*.
 
 | Field | |
 |---|---|
-| **Relay URL** | Base URL of the relay, `https://` form (**not** `wss://`) — this node uses the relay's REST surface. |
+| **Relay URL** | Base URL of the relay. `https://`, `http://`, `wss://` and `ws://` are all accepted and normalised to the REST form. |
 | **Private Key** | The bot identity's Nostr secret key, `nsec1…` or 64-char hex. |
+| **NIP-OA Auth Tag** | *Optional.* A delegated-agent auth tag `["auth","<owner-pubkey-hex>","<conditions>","<sig-hex>"]`, proving this identity acts for an owner. Attached to every event published. Leave empty for an ordinary member key. |
 
 Two things that are not obvious and cause most first-run failures:
 
@@ -87,6 +88,8 @@ otherwise look like bugs in this node.
   Put a **Limit** node after them before any node that writes, or the write fires once per item.
 - **Presence is ephemeral** (a ~180 s TTL): a user with no entry is reported `offline` rather
   than omitted, so `is X online?` always returns a row.
+- **Content is capped in UTF-8 BYTES, not characters** — 64 KiB for messages and edits, 60 KiB
+  for diffs. Emoji cost 4 bytes each, so a "short" message can still exceed it.
 - **Set Profile merges** over the existing `kind:0` rather than replacing it, and treats an empty
   field as *leave unchanged*. `kind:0` is replaceable, so a naive write would delete every field
   you did not set — including the `name` that makes `@mentions` resolve.
@@ -110,6 +113,11 @@ npm test        # ~50 checks, no network or relay required
 Tests cover the SSRF guard, pagination, event-id uniqueness, response shaping and the profile
 merge. They deliberately do **not** cover the streaming download path, WebSocket lifecycle or
 live relay behaviour — verify those against a real relay.
+
+## Icons
+
+`buzz.svg` / `buzz.dark.svg` are original artwork for this package. They are **not** Block's
+Buzz mark, and this project is not affiliated with Block, Inc.
 
 ## License
 

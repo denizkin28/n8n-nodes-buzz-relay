@@ -34,18 +34,100 @@ function decodeSecretKey(raw) {
 }
 
 function normaliseRelayUrl(raw) {
-	const relayUrl = String(raw || '').trim().replace(/\/+$/, '');
-
-	if (!relayUrl) {
+	const trimmed = String(raw == null ? '' : raw).trim();
+	if (!trimmed) {
 		throw new Error('Relay URL is empty in the Buzz API credential');
 	}
-	if (!/^https?:\/\//i.test(relayUrl)) {
+
+	// Accept the WebSocket forms and convert, rather than rejecting them. `wss://` is what the
+	// Buzz app and docs show, so it is the form people naturally paste — and this node talks to
+	// the relay's REST surface, which is the same host over http(s). Refusing it taught the user
+	// nothing they could not be given automatically.
+	let url;
+	try {
+		url = new URL(trimmed);
+	} catch (e) {
 		throw new Error(
-			`Relay URL must start with http:// or https://, got "${relayUrl}". A wss:// URL will not work here.`,
+			`Relay URL is not a valid URL: "${trimmed}". Expected something like ` +
+			'https://your-community.communities.buzz.xyz',
 		);
 	}
 
-	return relayUrl;
+	if (url.protocol === 'ws:') url.protocol = 'http:';
+	else if (url.protocol === 'wss:') url.protocol = 'https:';
+
+	if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+		throw new Error(
+			`Relay URL must be http(s):// or ws(s)://, got "${url.protocol}//" in "${trimmed}"`,
+		);
+	}
+
+	// A query string or fragment on a base URL is always a paste error, and would corrupt every
+	// path built from it.
+	url.search = '';
+	url.hash = '';
+	url.pathname = url.pathname.replace(/\/+$/, '');
+	if (url.pathname === '/') url.pathname = '';
+
+	return url.toString().replace(/\/$/, '');
+}
+
+// Buzz channel ids are UUIDs. Validating locally turns an opaque relay rejection into a message
+// that names the offending value, and lowercasing matches how the relay stores them.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function normaliseChannelId(raw) {
+	const trimmed = String(raw == null ? '' : raw).trim();
+	if (!UUID_PATTERN.test(trimmed)) {
+		throw new Error(
+			`Channel ID must be a UUID, got "${trimmed.slice(0, 40)}". Pick a channel from the ` +
+			'list, or pass the channel UUID (not its name).',
+		);
+	}
+	return trimmed.toLowerCase();
+}
+
+// Content ceilings enforced by the relay SDK (`buzz-sdk/src/builders.rs`), in BYTES not
+// characters — `check_content` measures UTF-8 length, so emoji and non-Latin text hit it sooner
+// than the character count suggests. Checking locally names the limit and the actual size
+// instead of surfacing a generic relay rejection.
+const MAX_CONTENT_BYTES = 64 * 1024;
+const MAX_DIFF_CONTENT_BYTES = 60 * 1024; // diffs and git patches are lower — verified in builders.rs
+
+function assertContentWithinLimit(content, max = MAX_CONTENT_BYTES, what = 'message') {
+	const bytes = Buffer.byteLength(String(content == null ? '' : content), 'utf8');
+	if (bytes > max) {
+		throw new Error(
+			`This ${what} is ${bytes} bytes — the relay limit is ${max}. Note the limit is on ` +
+			'UTF-8 BYTES, so emoji and non-Latin characters count for more than one.',
+		);
+	}
+}
+
+// NIP-OA delegated-agent auth tag: ["auth", <owner-pubkey-hex>, <conditions>, <sig-hex>].
+// Optional — only set when a bot acts on behalf of an owner identity. Shape per
+// `buzz-sdk/src/nip_oa.rs`; the relay extracts the owner from it (a ban on the owner cascades
+// to the agent), so a malformed tag must fail here rather than be sent and silently ignored.
+function parseAuthTag(raw) {
+	const trimmed = String(raw == null ? '' : raw).trim();
+	if (!trimmed) return null;
+
+	let parsed;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch (e) {
+		throw new Error(
+			'NIP-OA Auth Tag is not valid JSON. Expected ["auth","<owner-pubkey-hex>","<conditions>","<sig-hex>"]',
+		);
+	}
+	if (!Array.isArray(parsed) || parsed.length !== 4 || parsed[0] !== 'auth'
+		|| !parsed.every((p) => typeof p === 'string')) {
+		throw new Error(
+			'NIP-OA Auth Tag must be a 4-element JSON array of strings starting with "auth": ' +
+			'["auth","<owner-pubkey-hex>","<conditions>","<sig-hex>"]',
+		);
+	}
+	return parsed;
 }
 
 let authCounter = 0;
@@ -199,6 +281,11 @@ module.exports = {
 	KIND_CHANNEL_METADATA,
 	decodeSecretKey,
 	normaliseRelayUrl,
+	normaliseChannelId,
+	assertContentWithinLimit,
+	parseAuthTag,
+	MAX_CONTENT_BYTES,
+	MAX_DIFF_CONTENT_BYTES,
 	authHeader,
 	queryEvents,
 	fetchPaged,

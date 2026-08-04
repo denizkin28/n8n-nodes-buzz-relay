@@ -12,6 +12,10 @@ const {
 	KIND_CHANNEL_METADATA,
 	decodeSecretKey,
 	normaliseRelayUrl,
+	normaliseChannelId,
+	assertContentWithinLimit,
+	parseAuthTag,
+	MAX_DIFF_CONTENT_BYTES,
 	authHeader,
 	queryEvents,
 	tagValue,
@@ -508,9 +512,14 @@ function assertHexPubkey(pubkey) {
 async function publishEvent(ctx, relayUrl, secretKey, kind, tags, content, options = {}) {
 	const url = `${relayUrl}/events`;
 
+	// A delegated agent must prove which owner it acts for on EVERY event it signs, not only on
+	// messages — the relay reads the owner out of this tag (a ban on the owner cascades to the
+	// agent). Appended here so no operation can forget it.
+	const allTags = options.authTag ? [...tags, options.authTag] : tags;
+
 	const event = finalizeUniqueEvent(
 		kind,
-		tags,
+		allTags,
 		String(content == null ? '' : content),
 		secretKey,
 		options.minCreatedAt,
@@ -1254,6 +1263,13 @@ class Buzz {
 		const credentials = await this.getCredentials('buzzApi');
 		const relayUrl = normaliseRelayUrl(credentials.relayUrl);
 		const secretKey = decodeSecretKey(credentials.privateKey);
+		const authTag = parseAuthTag(credentials.authTag);
+
+		// Bound once rather than passed at ~15 call sites: threading `authTag` through each one
+		// meant any new operation silently published without it, which the relay would accept
+		// while treating the agent as unauthorised-by-owner.
+		const publish = (kind, tags, content, opts = {}) =>
+			publishEvent(this, relayUrl, secretKey, kind, tags, content, { authTag, ...opts });
 		const selfPubkey = getPublicKey(secretKey);
 
 		const resource = this.getNodeParameter('resource', 0);
@@ -1302,12 +1318,13 @@ class Buzz {
 					);
 					result = upload;
 				} else if (resource === 'message' && operation === 'send') {
-					const channelId = String(this.getNodeParameter('channelId', i)).trim();
+					const channelId = normaliseChannelId(this.getNodeParameter('channelId', i));
 					const options = this.getNodeParameter('options', i, {});
 					const tags = [['h', channelId]];
 					if (options.replyTo) tags.push(['e', String(options.replyTo).trim()]);
 
 					let content = String(this.getNodeParameter('content', i));
+					assertContentWithinLimit(content, undefined, 'message');
 					const uploads = [];
 
 					let attachedBytes = 0;
@@ -1337,7 +1354,7 @@ class Buzz {
 						content = `${content}\n${attachmentMarkdown(upload)}`;
 					}
 
-					result = await publishEvent(this, relayUrl, secretKey, KIND_MESSAGE, tags, content);
+					result = await publish(KIND_MESSAGE, tags, content);
 					result.channelId = channelId;
 					if (uploads.length) {
 						result.attachments = uploads.map((u) => ({
@@ -1351,7 +1368,8 @@ class Buzz {
 					const limit = this.getNodeParameter('limit', i, 50);
 					const onlyMine = this.getNodeParameter('onlyMine', i, false);
 					const filters = this.getNodeParameter('filters', i, {});
-					const channelId = String(this.getNodeParameter('channelId', i, '') || '').trim();
+					const rawChannelId = String(this.getNodeParameter('channelId', i, '') || '').trim();
+					const channelId = rawChannelId ? normaliseChannelId(rawChannelId) : '';
 
 					const filter = { kinds: [KIND_MESSAGE], limit };
 					if (channelId) filter['#h'] = [channelId];
@@ -1378,34 +1396,31 @@ class Buzz {
 					}
 					continue;
 				} else if (resource === 'message' && operation === 'edit') {
-					const channelId = String(this.getNodeParameter('channelId', i)).trim();
+					const channelId = normaliseChannelId(this.getNodeParameter('channelId', i));
 					const eventId = String(this.getNodeParameter('eventId', i)).trim();
-					result = await publishEvent(
-						this, relayUrl, secretKey,
-						KIND_MESSAGE_EDIT,
+					const newContent = String(this.getNodeParameter('content', i));
+					assertContentWithinLimit(newContent, undefined, 'edited message');
+					result = await publish(KIND_MESSAGE_EDIT,
 						[['e', eventId], ['h', channelId]],
-						this.getNodeParameter('content', i),
+						newContent,
 					);
 					result.editedEventId = eventId;
 					result.channelId = channelId;
 				} else if (resource === 'message' && operation === 'delete') {
-					const channelId = String(this.getNodeParameter('channelId', i)).trim();
+					const channelId = normaliseChannelId(this.getNodeParameter('channelId', i));
 					const eventId = String(this.getNodeParameter('eventId', i)).trim();
-					result = await publishEvent(
-						this, relayUrl, secretKey,
-						KIND_DELETE, [['e', eventId], ['h', channelId]], '',
+					result = await publish(KIND_DELETE, [['e', eventId], ['h', channelId]], '',
 					);
 					result.deletedEventId = eventId;
 					result.channelId = channelId;
 				} else if (resource === 'reaction' && operation === 'add') {
 					const eventId = String(this.getNodeParameter('eventId', i)).trim();
-					const channelId = String(this.getNodeParameter('channelId', i, '') || '').trim();
+					const rawChannelId = String(this.getNodeParameter('channelId', i, '') || '').trim();
+					const channelId = rawChannelId ? normaliseChannelId(rawChannelId) : '';
 					const tags = [['e', eventId]];
 					if (channelId) tags.push(['h', channelId]);
 
-					result = await publishEvent(
-						this, relayUrl, secretKey,
-						KIND_REACTION, tags, this.getNodeParameter('emoji', i),
+					result = await publish(KIND_REACTION, tags, this.getNodeParameter('emoji', i),
 					);
 					result.reactedToEventId = eventId;
 				} else if (resource === 'reaction' && operation === 'get') {
@@ -1463,21 +1478,18 @@ class Buzz {
 					// NOTE: only an `e` tag — no `h`. Message edit/delete DO require `h`
 					// ("channel-scoped events must include an h tag"), but the captured reaction
 					// deletion carries the reaction id alone. Do not "fix" this by adding a channel.
-					result = await publishEvent(
-						this, relayUrl, secretKey, KIND_DELETE, [['e', match.id]], '',
+					result = await publish(KIND_DELETE, [['e', match.id]], '',
 					);
 					result.removedReactionId = match.id;
 					result.reactedToEventId = eventId;
 					result.emoji = emoji;
 				} else if (resource === 'canvas' && operation === 'set') {
-					const channelId = String(this.getNodeParameter('channelId', i)).trim();
-					result = await publishEvent(
-						this, relayUrl, secretKey,
-						KIND_CANVAS, [['h', channelId]], this.getNodeParameter('content', i),
+					const channelId = normaliseChannelId(this.getNodeParameter('channelId', i));
+					result = await publish(KIND_CANVAS, [['h', channelId]], this.getNodeParameter('content', i),
 					);
 					result.channelId = channelId;
 				} else if (resource === 'canvas' && operation === 'get') {
-					const channelId = String(this.getNodeParameter('channelId', i)).trim();
+					const channelId = normaliseChannelId(this.getNodeParameter('channelId', i));
 					const events = newestFirst(
 						await queryEvents(this, relayUrl, secretKey, [
 							{ kinds: [KIND_CANVAS], '#h': [channelId], limit: 10 },
@@ -1503,7 +1515,7 @@ class Buzz {
 					// NON-STANDARD filter field the relay understands; it is only sent when set,
 					// matching the CLI when --depth-limit is omitted.
 					const rootId = String(this.getNodeParameter('eventId', i)).trim();
-					const channelId = String(this.getNodeParameter('threadChannelId', i)).trim();
+					const channelId = normaliseChannelId(this.getNodeParameter('threadChannelId', i));
 					const limit = Number(this.getNodeParameter('threadLimit', i, 100)) || 100;
 					const depthLimit = Number(this.getNodeParameter('threadDepthLimit', i, 0)) || 0;
 
@@ -1560,8 +1572,7 @@ class Buzz {
 						);
 					}
 
-					result = await publishEvent(
-						this, relayUrl, secretKey, KIND_VOTE,
+					result = await publish(KIND_VOTE,
 						[['h', channelId], ['e', eventId]],
 						direction === 'down' ? '-' : '+',
 					);
@@ -1569,8 +1580,10 @@ class Buzz {
 					result.channelId = channelId;
 					result.direction = direction;
 				} else if (resource === 'message' && operation === 'sendDiff') {
-					const channelId = String(this.getNodeParameter('diffChannelId', i)).trim();
+					const channelId = normaliseChannelId(this.getNodeParameter('diffChannelId', i));
 					const diff = String(this.getNodeParameter('diffContent', i));
+					// Diffs cap LOWER than messages — 60 KiB, not 64. Verified in builders.rs.
+					assertContentWithinLimit(diff, MAX_DIFF_CONTENT_BYTES, 'diff');
 					const opts = this.getNodeParameter('diffOptions', i, {}) || {};
 
 					const tags = [
@@ -1597,7 +1610,7 @@ class Buzz {
 					// Reply marker is the 4-element NIP-10 form: ["e", id, "", "reply"].
 					if (opts.replyTo) tags.push(['e', String(opts.replyTo).trim(), '', 'reply']);
 
-					result = await publishEvent(this, relayUrl, secretKey, KIND_DIFF, tags, diff);
+					result = await publish(KIND_DIFF, tags, diff);
 					result.channelId = channelId;
 				} else if (resource === 'user' && operation === 'setProfile') {
 					const fields = this.getNodeParameter('profileFields', i, {}) || {};
@@ -1654,9 +1667,8 @@ class Buzz {
 
 					// Strictly newer than the head we merged from, so a concurrent edit in the same
 					// second cannot silently win the lowest-event-id tie-break and discard this.
-					result = await publishEvent(
-						this, relayUrl, secretKey, KIND_PROFILE, [], JSON.stringify(next),
-						{ minCreatedAt: existingEvent ? existingEvent.created_at : undefined },
+					result = await publish(KIND_PROFILE, [], JSON.stringify(next),
+						{ minCreatedAt: existingEvent ? existingEvent.created_at : undefined, authTag },
 					);
 					if (result.discarded) {
 						throw new Error(
@@ -1703,8 +1715,7 @@ class Buzz {
 					const tags = [['d', 'general']];
 					if (text && emoji) tags.push(['emoji', emoji]);
 
-					result = await publishEvent(
-						this, relayUrl, secretKey, KIND_USER_STATUS, tags, text,
+					result = await publish(KIND_USER_STATUS, tags, text,
 					);
 					result.pubkey = getPublicKey(secretKey);
 					result.status = text;
@@ -1728,7 +1739,7 @@ class Buzz {
 					}
 					continue;
 				} else if (resource === 'channel' && operation === 'get') {
-					const uuid = String(this.getNodeParameter('channelUuid', i)).trim();
+					const uuid = normaliseChannelId(this.getNodeParameter('channelUuid', i));
 					const events = await queryEvents(this, relayUrl, secretKey, [
 						{ '#d': [uuid], kinds: [KIND_CHANNEL_METADATA], limit: 1 },
 					]);
@@ -1761,7 +1772,7 @@ class Buzz {
 					}
 					continue;
 				} else if (resource === 'channel' && operation === 'members') {
-					const uuid = String(this.getNodeParameter('channelUuid', i)).trim();
+					const uuid = normaliseChannelId(this.getNodeParameter('channelUuid', i));
 					const events = await queryEvents(this, relayUrl, secretKey, [
 						{ '#d': [uuid], kinds: [KIND_CHANNEL_MEMBERS], limit: 1 },
 					]);
@@ -1794,10 +1805,10 @@ class Buzz {
 					];
 					const about = String(this.getNodeParameter('channelAbout', i, '') || '');
 					if (about) tags.push(['about', about]);
-					result = await publishEvent(this, relayUrl, secretKey, KIND_CHANNEL_CREATE, tags, '');
+					result = await publish(KIND_CHANNEL_CREATE, tags, '');
 					result.channelId = uuid;
 				} else if (resource === 'channel' && operation === 'update') {
-					const uuid = String(this.getNodeParameter('channelUuid', i)).trim();
+					const uuid = normaliseChannelId(this.getNodeParameter('channelUuid', i));
 					const tags = [['h', uuid]];
 					const newName = String(this.getNodeParameter('channelNewName', i, '') || '');
 					const about = String(this.getNodeParameter('channelAbout', i, '') || '');
@@ -1806,49 +1817,44 @@ class Buzz {
 					if (tags.length === 1) {
 						throw new Error('Channel: Update needs a New Name or a Description — both were empty');
 					}
-					result = await publishEvent(this, relayUrl, secretKey, KIND_CHANNEL_EDIT_METADATA, tags, '');
+					result = await publish(KIND_CHANNEL_EDIT_METADATA, tags, '');
 					result.channelId = uuid;
 				} else if (
 					resource === 'channel' &&
 					['setTopic', 'setPurpose', 'archive', 'unarchive'].includes(operation)
 				) {
-					const uuid = String(this.getNodeParameter('channelUuid', i)).trim();
+					const uuid = normaliseChannelId(this.getNodeParameter('channelUuid', i));
 					const tag =
 						operation === 'setTopic'
 							? ['topic', String(this.getNodeParameter('channelTopic', i))]
 							: operation === 'setPurpose'
 								? ['purpose', String(this.getNodeParameter('channelPurpose', i))]
 								: ['archived', operation === 'archive' ? 'true' : 'false'];
-					result = await publishEvent(
-						this, relayUrl, secretKey, KIND_CHANNEL_EDIT_METADATA, [['h', uuid], tag], '',
+					result = await publish(KIND_CHANNEL_EDIT_METADATA, [['h', uuid], tag], '',
 					);
 					result.channelId = uuid;
 				} else if (
 					resource === 'channel' && ['join', 'leave', 'delete'].includes(operation)
 				) {
-					const uuid = String(this.getNodeParameter('channelUuid', i)).trim();
+					const uuid = normaliseChannelId(this.getNodeParameter('channelUuid', i));
 					const kind =
 						operation === 'join'
 							? KIND_CHANNEL_JOIN
 							: operation === 'leave'
 								? KIND_CHANNEL_LEAVE
 								: KIND_CHANNEL_DELETE;
-					result = await publishEvent(this, relayUrl, secretKey, kind, [['h', uuid]], '');
+					result = await publish(kind, [['h', uuid]], '');
 					result.channelId = uuid;
 				} else if (
 					resource === 'channel' && ['addMember', 'removeMember'].includes(operation)
 				) {
-					const uuid = String(this.getNodeParameter('channelUuid', i)).trim();
+					const uuid = normaliseChannelId(this.getNodeParameter('channelUuid', i));
 					const pubkey = normalisePubkey(this.getNodeParameter('targetPubkey', i));
 					const tags = [['h', uuid], ['p', pubkey]];
 					if (operation === 'addMember') {
 						tags.push(['role', String(this.getNodeParameter('memberRole', i))]);
 					}
-					result = await publishEvent(
-						this,
-						relayUrl,
-						secretKey,
-						operation === 'addMember' ? KIND_CHANNEL_ADD_MEMBER : KIND_CHANNEL_REMOVE_MEMBER,
+					result = await publish(operation === 'addMember' ? KIND_CHANNEL_ADD_MEMBER : KIND_CHANNEL_REMOVE_MEMBER,
 						tags,
 						'',
 					);
