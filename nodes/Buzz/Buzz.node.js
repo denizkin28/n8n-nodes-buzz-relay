@@ -45,6 +45,9 @@ const THREAD_KINDS = [9, 40002, 40003, 40008, 45003];
 
 const KIND_VOTE = 45002;        // forum up/down vote — content "+" or "-"
 const KIND_DIFF = 40008;        // code diff / patch message
+const KIND_FORUM_POST = 45001;    // forum thread root — the only valid target for a vote
+const KIND_FORUM_COMMENT = 45003; // reply within a forum thread
+const MENTION_CAP = 50;           // buzz-sdk/src/mentions.rs
 const KIND_USER_STATUS = 30315;      // NIP-38 status line
 const KIND_PRESENCE_SNAPSHOT = 40902; // the READ side of presence (writes are kind 20001)
 const KIND_REACTION = 7;
@@ -446,6 +449,30 @@ function presenceFromEvents(pubkeys, events) {
 	});
 }
 
+// Mentions become `p` tags — lowercased, de-duplicated and capped, per buzz-sdk's
+// `mention_tags()`. The relay matches mentions on this tag, never on the display name.
+function mentionTags(raw) {
+	const list = String(raw == null ? '' : raw)
+		.split(',').map((m) => m.trim()).filter(Boolean)
+		.map((m) => normalisePubkey(m));
+	const seen = [];
+	for (const pk of list) if (!seen.includes(pk)) seen.push(pk);
+	if (seen.length > MENTION_CAP) {
+		throw new Error(`Too many mentions: ${seen.length} — the relay caps them at ${MENTION_CAP}`);
+	}
+	return seen.map((pk) => ['p', pk]);
+}
+
+// NIP-10 thread references, per buzz-sdk's `thread_tags()`. A direct reply to the root carries
+// ONE marked `e` tag; a nested reply carries root AND parent, distinctly marked. Collapsing
+// those two cases would reparent replies in the client's thread view.
+function threadTags(rootId, parentId) {
+	const root = String(rootId).trim();
+	const parent = String(parentId || '').trim() || root;
+	if (root === parent) return [['e', root, '', 'reply']];
+	return [['e', root, '', 'root'], ['e', parent, '', 'reply']];
+}
+
 // Merge profile edits over the EXISTING kind:0 content.
 //
 // ⚠️ kind:0 is REPLACEABLE — whatever is published wins outright, so anything omitted is
@@ -688,6 +715,8 @@ class Buzz {
 						{ name: 'Thread', value: 'thread', description: 'Get a root message and its replies', action: 'Get a message thread' },
 						{ name: 'Vote', value: 'vote', description: 'Upvote or downvote a forum post', action: 'Vote on a message' },
 						{ name: 'Send Diff', value: 'sendDiff', description: 'Send a code diff / patch to a channel', action: 'Send a diff' },
+						{ name: 'Send Forum Post', value: 'sendForumPost', description: 'Start a forum thread — the only kind of message a vote can target', action: 'Send a forum post' },
+						{ name: 'Send Forum Comment', value: 'sendForumComment', description: 'Reply inside a forum thread', action: 'Send a forum comment' },
 					],
 					default: 'send',
 				},
@@ -701,6 +730,7 @@ class Buzz {
 						{ name: 'Add', value: 'add', description: 'Add an emoji reaction to a message', action: 'Add a reaction' },
 						{ name: 'Remove', value: 'remove', description: 'Remove one of your own emoji reactions from a message', action: 'Remove a reaction' },
 						{ name: 'Get', value: 'get', description: 'List all reactions on a message', action: 'Get reactions' },
+						{ name: 'Add Custom Emoji', value: 'addCustomEmoji', description: 'React with a custom emoji shortcode', action: 'Add a custom emoji reaction' },
 					],
 					default: 'add',
 				},
@@ -756,6 +786,68 @@ class Buzz {
 						{ name: 'Get Presence', value: 'getPresence', description: 'Get online/away/offline presence for one or more pubkeys', action: 'Get user presence' },
 					],
 					default: 'get',
+				},
+				{
+					displayName: 'Channel Name or ID',
+					name: 'forumChannelId',
+					type: 'options',
+					typeOptions: { loadOptionsMethod: 'getChannels' },
+					default: '',
+					required: true,
+					displayOptions: { show: { resource: ['message'], operation: ['sendForumPost', 'sendForumComment'] } },
+					description: 'Must be a FORUM-type channel. Posting a forum kind into a stream channel is refused by the relay.',
+				},
+				{
+					displayName: 'Content',
+					name: 'forumContent',
+					type: 'string',
+					typeOptions: { rows: 4 },
+					default: '',
+					required: true,
+					displayOptions: { show: { resource: ['message'], operation: ['sendForumPost', 'sendForumComment'] } },
+				},
+				{
+					displayName: 'Root Event ID',
+					name: 'forumRootId',
+					type: 'string',
+					default: '',
+					required: true,
+					displayOptions: { show: { resource: ['message'], operation: ['sendForumComment'] } },
+					description: 'The forum post (kind 45001) this thread belongs to',
+				},
+				{
+					displayName: 'Parent Event ID',
+					name: 'forumParentId',
+					type: 'string',
+					default: '',
+					displayOptions: { show: { resource: ['message'], operation: ['sendForumComment'] } },
+					description: 'Leave empty to reply directly to the root. Set it to nest the reply under another comment.',
+				},
+				{
+					displayName: 'Mentions',
+					name: 'forumMentions',
+					type: 'string',
+					default: '',
+					displayOptions: { show: { resource: ['message'], operation: ['sendForumPost', 'sendForumComment'] } },
+					description: 'Comma-separated 64-char hex pubkeys to mention (max 50)',
+				},
+				{
+					displayName: 'Emoji Shortcode',
+					name: 'emojiShortcode',
+					type: 'string',
+					default: '',
+					required: true,
+					displayOptions: { show: { resource: ['reaction'], operation: ['addCustomEmoji'] } },
+					placeholder: 'party_parrot',
+					description: 'Without the surrounding colons — the node adds them',
+				},
+				{
+					displayName: 'Emoji Image URL',
+					name: 'emojiUrl',
+					type: 'string',
+					default: '',
+					required: true,
+					displayOptions: { show: { resource: ['reaction'], operation: ['addCustomEmoji'] } },
 				},
 				{
 					displayName: 'Direction',
@@ -936,6 +1028,15 @@ class Buzz {
 					displayOptions: { show: { resource: ['channel'], operation: ['create'] } },
 				},
 				{
+					displayName: 'TTL (Seconds)',
+					name: 'channelTtl',
+					type: 'number',
+					default: 0,
+					typeOptions: { minValue: 0 },
+					displayOptions: { show: { resource: ['channel'], operation: ['create'] } },
+					description: 'Make the channel EPHEMERAL: the relay archives it this many seconds after the last message. 0 = permanent.',
+				},
+				{
 					displayName: 'Description',
 					name: 'channelAbout',
 					type: 'string',
@@ -1085,6 +1186,20 @@ class Buzz {
 							placeholder: 'data, chart',
 							description:
 								'Comma-separated binary field names to upload and attach. Each becomes an imeta tag, and its URL is appended to the message so clients that ignore imeta still show it.',
+						},
+						{
+							displayName: 'Broadcast',
+							name: 'broadcast',
+							type: 'boolean',
+							default: false,
+							description: 'Whether to add Buzz\'s broadcast tag to the message',
+						},
+						{
+							displayName: 'Mentions',
+							name: 'mentions',
+							type: 'string',
+							default: '',
+							description: 'Comma-separated 64-char hex pubkeys to mention (max 50). Mentions are matched on this tag, not on names in the text.',
 						},
 					],
 				},
@@ -1322,6 +1437,8 @@ class Buzz {
 					const options = this.getNodeParameter('options', i, {});
 					const tags = [['h', channelId]];
 					if (options.replyTo) tags.push(['e', String(options.replyTo).trim()]);
+					if (options.broadcast) tags.push(['broadcast', '1']);
+					tags.push(...mentionTags(options.mentions));
 
 					let content = String(this.getNodeParameter('content', i));
 					assertContentWithinLimit(content, undefined, 'message');
@@ -1546,6 +1663,48 @@ class Buzz {
 						});
 					}
 					continue;
+				} else if (
+					resource === 'message'
+					&& (operation === 'sendForumPost' || operation === 'sendForumComment')
+				) {
+					const channelId = normaliseChannelId(this.getNodeParameter('forumChannelId', i));
+					const content = String(this.getNodeParameter('forumContent', i));
+					assertContentWithinLimit(content, undefined, 'forum post');
+
+					const tags = [['h', channelId]];
+					if (operation === 'sendForumComment') {
+						tags.push(...threadTags(
+							this.getNodeParameter('forumRootId', i),
+							this.getNodeParameter('forumParentId', i, ''),
+						));
+					}
+					tags.push(...mentionTags(this.getNodeParameter('forumMentions', i, '')));
+
+					result = await publish(
+						operation === 'sendForumPost' ? KIND_FORUM_POST : KIND_FORUM_COMMENT,
+						tags,
+						content,
+					);
+					result.channelId = channelId;
+				} else if (resource === 'reaction' && operation === 'addCustomEmoji') {
+					// Custom emoji reactions are still kind 7, but the content is the shortcode
+					// wrapped in colons and an `emoji` tag carries the shortcode + image URL.
+					const eventId = String(this.getNodeParameter('eventId', i)).trim();
+					const shortcode = String(this.getNodeParameter('emojiShortcode', i))
+						.trim().replace(/^:|:$/g, '');
+					const url = String(this.getNodeParameter('emojiUrl', i)).trim();
+					if (!/^[a-z0-9_]+$/i.test(shortcode)) {
+						throw new Error(
+							`Emoji shortcode must be letters, digits and underscores only, got "${shortcode}"`,
+						);
+					}
+					result = await publish(
+						KIND_REACTION,
+						[['e', eventId], ['emoji', shortcode, url]],
+						`:${shortcode}:`,
+					);
+					result.reactedToEventId = eventId;
+					result.emoji = `:${shortcode}:`;
 				} else if (resource === 'message' && operation === 'vote') {
 					// Captured: kind 45002, content "+" / "-", tags h + e. The channel is NOT a
 					// parameter — the CLI resolves it from the target event, so the node does too
@@ -1805,6 +1964,8 @@ class Buzz {
 					];
 					const about = String(this.getNodeParameter('channelAbout', i, '') || '');
 					if (about) tags.push(['about', about]);
+					const ttl = Number(this.getNodeParameter('channelTtl', i, 0)) || 0;
+					if (ttl > 0) tags.push(['ttl', String(ttl)]);
 					result = await publish(KIND_CHANNEL_CREATE, tags, '');
 					result.channelId = uuid;
 				} else if (resource === 'channel' && operation === 'update') {
