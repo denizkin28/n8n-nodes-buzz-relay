@@ -3,6 +3,7 @@ const {
 	KIND_MESSAGE,
 	decodeSecretKey,
 	normaliseRelayUrl,
+	parseAuthTag,
 	queryEvents,
 	fetchPaged,
 	newestFirst,
@@ -166,6 +167,10 @@ class BuzzTrigger {
 		const credentials = await this.getCredentials('buzzApi');
 		const relayUrl = normaliseRelayUrl(credentials.relayUrl);
 		const secretKey = decodeSecretKey(credentials.privateKey);
+		// NIP-OA delegation applies to the trigger too: over HTTP it rides as a header, and over
+		// the WebSocket it must be a tag ON the NIP-42 auth event — `handlers/auth.rs` pulls it
+		// straight off that event. Without it a delegated identity cannot subscribe at all.
+		const authTag = parseAuthTag(credentials.authTag);
 		const selfPubkey = getPublicKey(secretKey);
 
 		const mode = this.getNodeParameter('mode');
@@ -273,7 +278,7 @@ class BuzzTrigger {
 
 		const fetchSince = (sinceSec) =>
 			fetchPaged(
-				(filters) => queryEvents(this, relayUrl, secretKey, filters),
+				(filters) => queryEvents(this, relayUrl, secretKey, filters, authTag),
 				baseFilter,
 				sinceSec,
 				{
@@ -311,7 +316,7 @@ class BuzzTrigger {
 				manualTriggerFunction: async () => {
 					// Manual test: show recent traffic instead of waiting for the next interval.
 					const events = newestFirst(
-						await queryEvents(this, relayUrl, secretKey, [{ ...baseFilter, limit: 5 }]),
+						await queryEvents(this, relayUrl, secretKey, [{ ...baseFilter, limit: 5 }], authTag),
 					).filter(accepts);
 					if (events.length) deliver(events.reverse());
 					else await new Promise((resolve) => { manualResolve = resolve; });
@@ -368,7 +373,7 @@ class BuzzTrigger {
 					{
 						kind: KIND_PRESENCE_UPDATE,
 						created_at: Math.floor(Date.now() / 1000),
-						tags: [],
+						tags: authTag ? [authTag] : [],
 						content: status,
 					},
 					secretKey,
@@ -495,7 +500,9 @@ class BuzzTrigger {
 						{
 							kind: KIND_CLIENT_AUTH,
 							created_at: Math.floor(Date.now() / 1000),
-							tags: [['relay', wsUrl], ['challenge', String(msg[1])]],
+							tags: authTag
+								? [['relay', wsUrl], ['challenge', String(msg[1])], authTag]
+								: [['relay', wsUrl], ['challenge', String(msg[1])]],
 							content: '',
 						},
 						secretKey,
@@ -589,7 +596,7 @@ class BuzzTrigger {
 				// So with two triggers on one credential, deactivating either one used to mark
 				// the still-connected bot offline until the survivor's next 60 s refresh.
 				// The relay's own disconnect cleanup is already correct and sufficient.
-				// (verified in the relay source.)
+				// (Verified against the relay source.)
 				clearTimers();
 				try {
 					if (socket && socket.readyState === 1) socket.send(JSON.stringify(['CLOSE', subId]));

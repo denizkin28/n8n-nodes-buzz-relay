@@ -157,7 +157,17 @@ function authHeader(secretKey, url, method) {
 
 // The relay wants the filter list at the top level; a wrapped { filters: [...] } is
 // rejected with "invalid filters: invalid type: map, expected a sequence".
-async function queryEvents(ctx, relayUrl, secretKey, filters) {
+// 🔑 Delegated (NIP-OA) identities must send the auth tag as an `x-auth-tag` HEADER on every
+// HTTP request, not only inside published events. The relay feeds that header into
+// `enforce_relay_membership` (buzz-relay/src/api/bridge.rs), so a delegated bot that is not
+// independently a relay member is refused on READS — query, media upload and download — even
+// though its writes succeed. Omitting it here made delegation look supported while leaving it
+// unusable. 
+function authTagHeader(authTag) {
+	return authTag ? { 'x-auth-tag': JSON.stringify(authTag) } : {};
+}
+
+async function queryEvents(ctx, relayUrl, secretKey, filters, authTag) {
 	const url = `${relayUrl}/query`;
 
 	const response = await ctx.helpers.httpRequest({
@@ -165,7 +175,7 @@ async function queryEvents(ctx, relayUrl, secretKey, filters) {
 		url,
 		body: filters,
 		json: true,
-		headers: { Authorization: authHeader(secretKey, url, 'POST') },
+		headers: { Authorization: authHeader(secretKey, url, 'POST'), ...authTagHeader(authTag) },
 	});
 
 	if (Array.isArray(response)) return response;
@@ -284,6 +294,7 @@ module.exports = {
 	normaliseChannelId,
 	assertContentWithinLimit,
 	parseAuthTag,
+	authTagHeader,
 	MAX_CONTENT_BYTES,
 	MAX_DIFF_CONTENT_BYTES,
 	authHeader,

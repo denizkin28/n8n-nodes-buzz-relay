@@ -15,9 +15,9 @@ It is **not** published as an n8n "community node" and is not on npm. You instal
 it in n8n's custom-nodes directory, which means:
 
 - **Self-hosted n8n only.** n8n Cloud cannot load custom nodes.
-- **Node 22+** — the trigger's realtime mode uses the global `WebSocket`, unavailable unflagged
-  before Node 22. On older runtimes set the trigger's **Connection Mode** to *Polling*; the rest
-  of the node is unaffected.
+- **Node 22+.** Realtime mode additionally depends on Node's global `WebSocket`, which is only
+  unflagged from 22.0.0. Dependencies also require ≥ 20.19, so older runtimes are not supported
+  even for the non-realtime operations.
 
 ## Install
 
@@ -42,10 +42,25 @@ volumes:
   - ./data:/home/node/.n8n        # package lives in ./data/custom/node_modules/<package>
 ```
 
-Custom nodes load in n8n's **main** process, so a change needs the **n8n** container restarted
-(restarting a task-runner container is not enough).
+Install or mount the package in **every n8n container that loads or executes workflows** — the
+main instance, and in queue mode every worker too — then restart those containers. Restarting
+only a task-runner container is not enough.
 
 Verify it loaded: the **Buzz** and **Buzz Trigger** nodes appear in the node panel.
+
+## Before you start
+
+You need a **Nostr identity for the bot** and a relay it is allowed to use:
+
+1. **Create a dedicated identity for the bot** — do not reuse your own. Any Nostr keypair works;
+   the Buzz desktop app can create one, or use the `buzz` CLI. Keep the **nsec** (secret) and note
+   the **public key**.
+2. **Add that public key to the community.** Membership is enforced relay-side, so until this is
+   done every request fails with `relay_membership_required`. On a hosted community, an owner or
+   admin adds it in Buzz Desktop.
+3. **Note the relay URL** — the base URL of the community's relay.
+4. **Publish a profile for the bot** once the credential works (`User → Set Profile`). A bot with
+   no `kind:0` profile cannot be `@`-mentioned at all, so mention-driven workflows never fire.
 
 ## Credential — Buzz API
 
@@ -55,12 +70,12 @@ Verify it loaded: the **Buzz** and **Buzz Trigger** nodes appear in the node pan
 | **Private Key** | The bot identity's Nostr secret key, `nsec1…` or 64-char hex. |
 | **NIP-OA Auth Tag** | *Optional.* A delegated-agent auth tag `["auth","<owner-pubkey-hex>","<conditions>","<sig-hex>"]`, proving this identity acts for an owner. Attached to every event published. Leave empty for an ordinary member key. |
 
-Two things that are not obvious and cause most first-run failures:
+**The single most common first-run failure is `relay_membership_required`** — the bot's public
+key is not yet a member of the community. See step 2 above.
 
-1. **The bot's pubkey must already be a member of the community**, or every request fails with
-   `relay_membership_required`. Membership is relay-side — add it in the Buzz desktop app.
-2. **A bot with no `kind:0` profile cannot be @-mentioned at all.** Publish one first
-   (`User → Set Profile`), or mention-driven workflows will never fire.
+**On Docker, the second most common failure** is cloning into the host's `~/.n8n` rather than the
+directory actually bind-mounted at the container's data dir. Use the host-side path that maps to
+it, and make sure the n8n user can read the files.
 
 ## Operations
 
@@ -68,9 +83,9 @@ Two things that are not obvious and cause most first-run failures:
 
 | Resource | Operations |
 |---|---|
-| **Message** | Send (reply-to + binary attachments), Get Many, Search, Edit, Delete, Thread, Vote, Send Diff |
-| **Reaction** | Add, Remove, Get |
-| **Channel** | List, Get, Search, Create, Update, Set Topic, Set Purpose, Archive, Unarchive, Delete, Join, Leave, Get Members, Add Member, Remove Member |
+| **Message** | Send (reply-to, mentions, broadcast, binary attachments), Get Many, Search, Edit, Delete, Thread, Vote, Send Diff, **Send Forum Post**, **Send Forum Comment** |
+| **Reaction** | Add, Remove, Get, **Add Custom Emoji** |
+| **Channel** | List, Get, Search, Create (optional TTL for ephemeral channels), Update, Set Topic, Set Purpose, Archive, Unarchive, Delete, Join, Leave, Get Members, Add Member, Remove Member |
 | **User** | Get, Get Many (+ relay-side name search), Get Self, Set Profile, Set Status, Get Presence |
 | **File** | Upload, Download |
 | **Canvas** | Get, Set |
@@ -81,7 +96,7 @@ One node, two transports via **Connection Mode**:
 
 | Mode | Latency | Notes |
 |---|---|---|
-| **Realtime** (default) | ~1.5 s | Persistent WebSocket. Outbound-only, so it works from behind NAT. Requires Node 22+. |
+| **Realtime** (default) | ~1.5 s *(observed)* | Persistent WebSocket. Outbound-only, so it works from behind NAT. Requires Node 22+. |
 | **Polling** | your interval, min 10 s | No long-lived connection; self-heals on the next tick. |
 
 Filters: **Only When Mentioned** (matched relay-side on the `p` tag, not on the display name),
@@ -92,28 +107,34 @@ While a realtime trigger is active the bot also publishes **presence**, so it sh
 
 ## Behaviour worth knowing
 
-These are relay behaviours discovered by testing, not opinions — they explain results that
-otherwise look like bugs in this node.
+These relay, SDK and node behaviours explain results that might otherwise look surprising. The
+layer responsible is named in each case, because "the relay rejected it" and "this node refused"
+need different fixes.
 
-- **Uploads are permanent.** The relay implements no media delete at any layer and orphan blobs
-  are never reclaimed. Deleting a message removes the *reference*, not the file. Treat uploading
+- **Uploads are effectively permanent** *(relay)*. The relay exposes **no media-delete API**, and
+  no active reclamation/GC path exists — the storage layer has a delete primitive, but nothing
+  production calls it. Deleting a message removes the *reference*, not the file. Treat uploading
   to a shared community as publishing.
-- **Audio and video cannot be uploaded** — the product has no stored-media feature for them.
-  Images, PDF, ZIP, GZIP and XML are accepted; BMP, TIFF, WAV and HTML are refused.
-- **Images carrying a C2PA / Content-Credentials manifest are rejected** with
-  `422 media contains metadata or a non-canonical metadata channel` — common for AI-generated
-  images, and invisible to EXIF/ICC checks. Re-encode the pixels to strip it.
-- **An archived channel cannot be deleted** — unarchive first.
-- **The channel creator is its sole owner**, and re-adding them at a lower role is refused.
-- **Votes require a forum post or comment as their target**; a plain message is refused.
-- **Reactions are not idempotent** — reacting twice to the same event is rejected outright.
-- **`Get Members`, `Get Many`, `Search`, `Thread` and `Get Presence` emit one item per result.**
-  Put a **Limit** node after them before any node that writes, or the write fires once per item.
-- **Presence is ephemeral** (a ~180 s TTL): a user with no entry is reported `offline` rather
+- **Standalone audio is rejected** *(relay)*; validated MP4 **video is supported** by the relay
+  (500 MB default ceiling), though this node applies its own 100 MiB cap. Images, PDF, ZIP, GZIP
+  and XML are accepted; BMP, TIFF, WAV and HTML are refused.
+- **Images carrying forbidden or non-canonical metadata channels are rejected** *(relay)* with
+  `422 media contains metadata or a non-canonical metadata channel`. Observed with an image
+  carrying a Content Credentials / C2PA manifest, which EXIF and ICC checks do not surface —
+  dump the JPEG `APP` markers to see it. Re-encoding the pixels removes it.
+- **An archived channel cannot be deleted** *(relay)* — unarchive first.
+- **A new channel starts with its creator as sole owner** *(relay)*. Further owners can be added; the last remaining owner cannot be demoted or removed.
+- **Votes require a forum post or comment as their target** *(relay)*; a plain message is refused.
+- **Reactions are not idempotent** *(relay)* — reacting twice to the same event is rejected outright.
+- **Many operations emit one item per result** *(n8n)*: Message Get Many / Search / Thread,
+  Reaction Get, Channel List / Search / Get Members, and User Get Many / Get Presence. Put a
+  **Limit** node after them before anything that writes, or the write fires once per item.
+- **Presence is ephemeral** *(relay)* — a ~180 s TTL: a user with no entry is reported `offline` rather
   than omitted, so `is X online?` always returns a row.
-- **Content is capped in UTF-8 BYTES, not characters** — 64 KiB for messages and edits, 60 KiB
-  for diffs. Emoji cost 4 bytes each, so a "short" message can still exceed it.
-- **Set Profile merges** over the existing `kind:0` rather than replacing it, and treats an empty
+- **Content is capped in UTF-8 BYTES, not characters.** This node and the Buzz SDK cap messages
+  and edits at 64 KiB; the relay separately enforces 60 KiB for diffs. Emoji cost 4 bytes each,
+  so a "short" message can still exceed it.
+- **Set Profile merges** *(node)* over the existing `kind:0` rather than replacing it, and treats an empty
   field as *leave unchanged*. `kind:0` is replaceable, so a naive write would delete every field
   you did not set — including the `name` that makes `@mentions` resolve.
 
@@ -133,15 +154,16 @@ npm install
 npm test        # 72 checks, no network or relay required
 ```
 
-Tests cover the SSRF guard, pagination, event-id uniqueness, response shaping and the profile
-merge. They deliberately do **not** cover the streaming download path, WebSocket lifecycle or
-live relay behaviour — verify those against a real relay.
+Tests cover the SSRF guard, pagination, event-id uniqueness, response shaping, the profile merge
+and capped-stream error propagation. They deliberately do **not** cover the full HTTP download
+and n8n binary-storage path, the WebSocket lifecycle, or live relay behaviour — verify those
+against a real relay.
 
 ## Icons
 
 `buzz.svg` / `buzz.dark.svg` were drawn for this package: a message bubble with a status dot,
 in indigo. They share no shape or colour value with Block's Buzz mark (a bee, built from
-circles and ellipses in `#d7d72e`) or with any other Buzz-related package.
+circles and ellipses in `#d7d72e`).
 
 This project is **not affiliated with, endorsed by, or connected to Block, Inc.** "Buzz" is
 their product name, used here only to say what this node talks to.

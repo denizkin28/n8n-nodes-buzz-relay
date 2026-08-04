@@ -1,5 +1,5 @@
-// Regression tests for the review of v0.10.1 (2026-08-04).
-// One test per finding fixed, each asserting the BROKEN behaviour is gone.
+// Regression tests: one per defect found in review, each asserting the broken behaviour is gone.
+
 // Run: node test/regressions.test.js
 
 const assert = require('assert');

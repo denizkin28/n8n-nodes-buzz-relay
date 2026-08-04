@@ -12,7 +12,7 @@ class BuzzApi {
 				required: true,
 				placeholder: 'https://your-community.communities.buzz.xyz',
 				description:
-					'Base URL of the Buzz relay. Use the https:// form, not wss:// — this node talks to the relay\'s REST surface.',
+					'Base URL of the Buzz relay. Accepts http(s):// or ws(s):// — WebSocket URLs are normalised to their HTTP form, since this node uses the relay\'s REST surface.',
 			},
 			{
 				displayName: 'Private Key',
@@ -33,7 +33,7 @@ class BuzzApi {
 				default: '',
 				placeholder: '["auth","<owner-pubkey-hex>","<conditions>","<sig-hex>"]',
 				description:
-					'Optional. A NIP-OA delegated-agent auth tag, proving this identity acts on behalf of an owner. Attached to every event this node publishes. Leave empty for an ordinary member key.',
+					'Optional. A NIP-OA delegated-agent auth tag, proving this identity acts on behalf of an owner. Sent on every relay request and attached to every published event, so a delegated identity can read as well as write. Leave empty for an ordinary member key.',
 			},
 		];
 	}

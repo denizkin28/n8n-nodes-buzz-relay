@@ -15,6 +15,7 @@ const {
 	normaliseChannelId,
 	assertContentWithinLimit,
 	parseAuthTag,
+	authTagHeader,
 	MAX_DIFF_CONTENT_BYTES,
 	authHeader,
 	queryEvents,
@@ -90,7 +91,7 @@ function uploadAuthHeader(secretKey, host, sha256) {
 	return `Nostr ${encoded}`;
 }
 
-async function uploadBlob(ctx, relayUrl, secretKey, buffer, mimeType, fileName) {
+async function uploadBlob(ctx, relayUrl, secretKey, buffer, mimeType, fileName, authTag) {
 	const url = `${relayUrl}/upload`;
 	const host = new URL(relayUrl).host;
 	const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
@@ -112,6 +113,7 @@ async function uploadBlob(ctx, relayUrl, secretKey, buffer, mimeType, fileName) 
 				Authorization: uploadAuthHeader(secretKey, host, sha256),
 				'Content-Type': mimeType,
 				'X-SHA-256': sha256,
+				...authTagHeader(authTag),
 			},
 		});
 	} catch (error) {
@@ -195,16 +197,17 @@ const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 // oversized input becomes heap in n8n's MAIN process. The relay's own ceiling is 100 MB for
 // generic files (buzz-media/src/config.rs), so anything above that is refused locally anyway —
 // this cap just makes the refusal happen BEFORE the allocation instead of after.
+// 
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 // Bounded output: one row is emitted per requested pubkey, so an unbounded input is an
-// unbounded item count in n8n's main process.
+// unbounded item count in n8n's main process. 
 const MAX_PRESENCE_PUBKEYS = 500;
 
 // The relay clamps a /query `limit` to 500 (1000 for an unfiltered kind:0 search). Reads that
 // omit `limit` get the relay DEFAULT of 100 — which is how `reaction: remove` could answer "no
 // reaction found" while an older matching one existed. Always ask explicitly, and say so when the
-// answer came back full.
+// answer came back full. 
 const RELAY_QUERY_CAP = 500;
 const RELAY_PROFILE_QUERY_CAP = 1000;
 
@@ -271,7 +274,7 @@ function cappedStream(limit, counter) {
 	});
 }
 
-async function downloadBlob(ctx, relayUrl, secretKey, fileUrl) {
+async function downloadBlob(ctx, relayUrl, secretKey, fileUrl, authTag) {
 	const parsed = assertSameOriginAsRelay(fileUrl, relayUrl);
 
 	const response = await ctx.helpers.httpRequest({
@@ -279,7 +282,7 @@ async function downloadBlob(ctx, relayUrl, secretKey, fileUrl) {
 		url: fileUrl,
 		encoding: 'stream',
 		returnFullResponse: true,
-		headers: { Authorization: downloadAuthHeader(secretKey, parsed.host) },
+		headers: { Authorization: downloadAuthHeader(secretKey, parsed.host), ...authTagHeader(authTag) },
 	});
 
 	const headers = response.headers || {};
@@ -300,7 +303,7 @@ async function downloadBlob(ctx, relayUrl, secretKey, fileUrl) {
 	// with no listener, which reaches `uncaughtException` in n8n's MAIN process and takes every
 	// workflow on the instance down with it. `pipeline()` propagates the failure into the
 	// returned stream, so it surfaces as a normal node error instead.
-	// (Reproduced under host Node 22.)
+	// (Reproduced under Node 22.)
 	const capped = cappedStream(MAX_DOWNLOAD_BYTES, counter);
 	stream.pipeline(response.body, capped, (error) => {
 		// pipeline destroys `capped` with this error, so the consumer already sees it. Swallow
@@ -347,6 +350,7 @@ const MAX_TIMESTAMP_NUDGE = 30;
 // LOWEST event id and silently discards the loser while still answering `accepted:true` — so two
 // profile edits in the same second can leave one of them dropped with both reporting success.
 // Publishing strictly newer than the head we merged from removes the tie entirely.
+// 
 function finalizeUniqueEvent(kind, tags, content, secretKey, minCreatedAt) {
 	let createdAt = Math.floor(Date.now() / 1000);
 	if (Number.isFinite(minCreatedAt) && createdAt <= minCreatedAt) createdAt = minCreatedAt + 1;
@@ -486,7 +490,7 @@ function threadTags(rootId, parentId) {
 // default to '' and the destructive reading would make an untouched field wipe a real value.
 function mergeProfile(existing, fields) {
 	// Guard here too, not only at the call site — a non-object `existing` spreads into numeric
-	// keys and destroys the profile.
+	// keys and destroys the profile. 
 	if (existing !== undefined && existing !== null
 		&& (typeof existing !== 'object' || Array.isArray(existing))) {
 		throw new Error(
@@ -514,7 +518,7 @@ function mergeProfile(existing, fields) {
 // input matched nothing on the way back: `user: getPresence` reported a genuinely-online user as
 // offline, with no error anywhere. Anything that keys a Map or filters by pubkey must go through
 // this, not through assertHexPubkey alone.
-// (reproduced against the installed build.)
+// (Reproduced against a live relay.)
 function normalisePubkey(pubkey) {
 	// Trim BEFORE validating: the call sites used to trim themselves, and validating first made a
 	// padded-but-valid pubkey throw. Caught by the regression test for this very fix.
@@ -557,7 +561,9 @@ async function publishEvent(ctx, relayUrl, secretKey, kind, tags, content, optio
 		url,
 		body: event,
 		json: true,
-		headers: { Authorization: authHeader(secretKey, url, 'POST') },
+		// Both: the tag ON the event proves delegation for the event itself, the HEADER is what
+		// `/events` feeds to enforce_relay_membership.
+		headers: { Authorization: authHeader(secretKey, url, 'POST'), ...authTagHeader(options.authTag) },
 	});
 
 	// The relay answers HTTP 200 with {"accepted": false} when it takes the request but
@@ -579,6 +585,7 @@ async function publishEvent(ctx, relayUrl, secretKey, kind, tags, content, optio
 	// That is not an error (the desired state may already hold), but reporting it as a plain
 	// success hides a write that never landed. Surface it instead of throwing, so the canvas
 	// writer — which legitimately republishes unchanged content — keeps working.
+	// 
 	const relayMessage = String((response && response.message) || '');
 	const discarded = /duplicate|stale|no-?op/i.test(relayMessage);
 
@@ -658,7 +665,7 @@ class Buzz {
 					required: true,
 					displayOptions: { show: { resource: ['file'], operation: ['upload'] } },
 					description:
-						'Name of the binary field holding the file to upload. Relay limit is 50 MB.',
+						'Name of the binary field holding the file to upload. This node caps each upload at 100 MiB; the relay may impose a lower, type-specific limit (images 50 MB, GIFs 10 MB, generic 100 MB).',
 				},
 				{
 					displayName: 'File URL',
@@ -1347,10 +1354,14 @@ class Buzz {
 					const credentials = await this.getCredentials('buzzApi');
 					const relayUrl = normaliseRelayUrl(credentials.relayUrl);
 					const secretKey = decodeSecretKey(credentials.privateKey);
+					// The channel picker is its own scope with its own credentials read, so the
+					// delegation tag has to be resolved here too — otherwise a delegated identity
+					// sees an empty channel list and no error.
+					const authTag = parseAuthTag(credentials.authTag);
 
 					const events = await queryEvents(this, relayUrl, secretKey, [
 						{ kinds: [KIND_CHANNEL_METADATA], limit: 500 },
-					]);
+					], authTag);
 
 					const seen = new Map();
 					for (const event of events) {
@@ -1385,6 +1396,12 @@ class Buzz {
 		// while treating the agent as unauthorised-by-owner.
 		const publish = (kind, tags, content, opts = {}) =>
 			publishEvent(this, relayUrl, secretKey, kind, tags, content, { authTag, ...opts });
+		// Same reasoning as `publish`: bound once so a delegated identity cannot be silently
+		// dropped from a read, an upload or a download by a call site that forgot to pass it.
+		const query = (filters) => queryEvents(this, relayUrl, secretKey, filters, authTag);
+		const upload = (buffer, mimeType, fileName) =>
+			uploadBlob(this, relayUrl, secretKey, buffer, mimeType, fileName, authTag);
+		const download = (fileUrl) => downloadBlob(this, relayUrl, secretKey, fileUrl, authTag);
 		const selfPubkey = getPublicKey(secretKey);
 
 		const resource = this.getNodeParameter('resource', 0);
@@ -1405,7 +1422,7 @@ class Buzz {
 					const outputField = String(this.getNodeParameter('outputBinaryField', i, 'data')).trim();
 					const downloadOptions = this.getNodeParameter('downloadOptions', i, {}) || {};
 
-					const blob = await downloadBlob(this, relayUrl, secretKey, fileUrl);
+					const blob = await download(fileUrl);
 					const fallbackName = decodeURIComponent(new URL(fileUrl).pathname.split('/').pop() || 'file');
 					const fileName = downloadOptions.fileName || fallbackName;
 
@@ -1428,8 +1445,7 @@ class Buzz {
 					const buffer = await this.helpers.getBinaryDataBuffer(i, property);
 					assertUploadSizeAllowed({ fileSizeBytes: buffer.length }, meta.fileName);
 
-					const upload = await uploadBlob(
-						this, relayUrl, secretKey, buffer, meta.mimeType, meta.fileName,
+					const upload = await upload(buffer, meta.mimeType, meta.fileName,
 					);
 					result = upload;
 				} else if (resource === 'message' && operation === 'send') {
@@ -1463,14 +1479,16 @@ class Buzz {
 								`Attachments total ${attachedBytes} bytes — the combined limit is ${MAX_UPLOAD_BYTES}`,
 							);
 						}
-						const upload = await uploadBlob(
-							this, relayUrl, secretKey, buffer, meta.mimeType, meta.fileName,
+						const upload = await upload(buffer, meta.mimeType, meta.fileName,
 						);
 						uploads.push(upload);
 						tags.push(imetaTag(upload));
 						content = `${content}\n${attachmentMarkdown(upload)}`;
 					}
 
+					// The pre-check above ran on the bare text; each attachment appends a markdown
+					// link, so a near-limit message with attachments could still cross 64 KiB.
+					assertContentWithinLimit(content, undefined, 'message with attachments');
 					result = await publish(KIND_MESSAGE, tags, content);
 					result.channelId = channelId;
 					if (uploads.length) {
@@ -1507,7 +1525,7 @@ class Buzz {
 						}
 					}
 
-					const events = newestFirst(await queryEvents(this, relayUrl, secretKey, [filter]));
+					const events = newestFirst(await query([filter]));
 					for (const event of events) {
 						returnData.push({ json: shapeMessage(event, selfPubkey), pairedItem: { item: i } });
 					}
@@ -1542,7 +1560,7 @@ class Buzz {
 					result.reactedToEventId = eventId;
 				} else if (resource === 'reaction' && operation === 'get') {
 					const eventId = String(this.getNodeParameter('eventId', i)).trim();
-					const events = await queryEvents(this, relayUrl, secretKey, [
+					const events = await query([
 						{ '#e': [eventId], kinds: [KIND_REACTION], limit: RELAY_QUERY_CAP },
 					]);
 					const reactionsTruncated = events.length >= RELAY_QUERY_CAP;
@@ -1575,7 +1593,7 @@ class Buzz {
 					const emoji = String(this.getNodeParameter('emoji', i));
 					const selfPubkey = getPublicKey(secretKey);
 
-					const mine = await queryEvents(this, relayUrl, secretKey, [
+					const mine = await query([
 						{ '#e': [eventId], authors: [selfPubkey], kinds: [KIND_REACTION], limit: RELAY_QUERY_CAP },
 					]);
 					const match = newestFirst(mine).find((e) => e.content === emoji);
@@ -1608,7 +1626,7 @@ class Buzz {
 				} else if (resource === 'canvas' && operation === 'get') {
 					const channelId = normaliseChannelId(this.getNodeParameter('channelId', i));
 					const events = newestFirst(
-						await queryEvents(this, relayUrl, secretKey, [
+						await query([
 							{ kinds: [KIND_CANVAS], '#h': [channelId], limit: 10 },
 						]),
 					);
@@ -1644,7 +1662,7 @@ class Buzz {
 					};
 					if (depthLimit > 0) repliesFilter.depth_limit = depthLimit;
 
-					const events = await queryEvents(this, relayUrl, secretKey, [
+					const events = await query([
 						repliesFilter,
 						{ ids: [rootId], limit: 1 },
 					]);
@@ -1714,13 +1732,14 @@ class Buzz {
 					// The UI is a two-value dropdown, but an EXPRESSION can produce anything, and
 					// `=== 'down' ? '-' : '+'` silently turned "DOWN" or "sideways" into an UPVOTE
 					// while echoing the bogus value back as `direction`.
+					// 
 					if (direction !== 'up' && direction !== 'down') {
 						throw new Error(
 							`Vote direction must be exactly "up" or "down", got "${direction}"`,
 						);
 					}
 
-					const found = await queryEvents(this, relayUrl, secretKey, [{ ids: [eventId] }]);
+					const found = await query([{ ids: [eventId] }]);
 					const target = newestFirst(found)[0];
 					if (!target) throw new Error(`No event found with id ${eventId}`);
 					const channelId = tagValue(target, 'h');
@@ -1775,7 +1794,7 @@ class Buzz {
 					const fields = this.getNodeParameter('profileFields', i, {}) || {};
 					const selfPubkey = getPublicKey(secretKey);
 
-					const existingEvents = await queryEvents(this, relayUrl, secretKey, [
+					const existingEvents = await query([
 						{ authors: [selfPubkey], kinds: [KIND_PROFILE], limit: 1 },
 					]);
 					const existingEvent = newestFirst(existingEvents)[0];
@@ -1787,6 +1806,7 @@ class Buzz {
 						// became {"0":"x",...} and `"abc"` became {"0":"a","1":"b","2":"c",...},
 						// destroying the profile while reporting success. Malformed JSON was also
 						// silently treated as {} and would have WIPED a real profile.
+						// 
 						let parsed;
 						try {
 							parsed = JSON.parse(existingEvent.content);
@@ -1858,7 +1878,7 @@ class Buzz {
 						);
 					}
 
-					const events = await queryEvents(this, relayUrl, secretKey, [
+					const events = await query([
 						{ authors: pubkeys, kinds: [KIND_PRESENCE_SNAPSHOT], limit: pubkeys.length },
 					]);
 					for (const row of presenceFromEvents(pubkeys, events)) {
@@ -1880,7 +1900,7 @@ class Buzz {
 					result.status = text;
 					result.cleared = text === '';
 				} else if (resource === 'channel' && operation === 'list') {
-					const events = await queryEvents(this, relayUrl, secretKey, [
+					const events = await query([
 						{ kinds: [KIND_CHANNEL_METADATA], limit: RELAY_QUERY_CAP },
 					]);
 					if (events.length >= RELAY_QUERY_CAP) {
@@ -1899,7 +1919,7 @@ class Buzz {
 					continue;
 				} else if (resource === 'channel' && operation === 'get') {
 					const uuid = normaliseChannelId(this.getNodeParameter('channelUuid', i));
-					const events = await queryEvents(this, relayUrl, secretKey, [
+					const events = await query([
 						{ '#d': [uuid], kinds: [KIND_CHANNEL_METADATA], limit: 1 },
 					]);
 					const event = newestFirst(events)[0];
@@ -1909,7 +1929,7 @@ class Buzz {
 					// The CLI pulls the full metadata set and filters locally — the relay has no
 					// text filter for kind 39000. Mirrored rather than invented.
 					const query = String(this.getNodeParameter('channelQuery', i)).toLowerCase();
-					const events = await queryEvents(this, relayUrl, secretKey, [
+					const events = await query([
 						{ kinds: [KIND_CHANNEL_METADATA], limit: RELAY_QUERY_CAP },
 					]);
 					// The filtering is local, so hitting the cap means a MATCH may be missing —
@@ -1932,7 +1952,7 @@ class Buzz {
 					continue;
 				} else if (resource === 'channel' && operation === 'members') {
 					const uuid = normaliseChannelId(this.getNodeParameter('channelUuid', i));
-					const events = await queryEvents(this, relayUrl, secretKey, [
+					const events = await query([
 						{ '#d': [uuid], kinds: [KIND_CHANNEL_MEMBERS], limit: 1 },
 					]);
 					const event = newestFirst(events)[0];
@@ -2023,7 +2043,7 @@ class Buzz {
 					result.pubkey = pubkey;
 				} else if (resource === 'user' && operation === 'get') {
 					const pubkey = normalisePubkey(this.getNodeParameter('userPubkey', i));
-					const events = await queryEvents(this, relayUrl, secretKey, [
+					const events = await query([
 						{ authors: [pubkey], kinds: [KIND_PROFILE], limit: 1 },
 					]);
 					const event = newestFirst(events)[0];
@@ -2049,7 +2069,7 @@ class Buzz {
 					const filter = { kinds: [KIND_PROFILE], limit: effectiveLimit };
 					if (search) filter.search = search;
 
-					const events = await queryEvents(this, relayUrl, secretKey, [filter]);
+					const events = await query([filter]);
 					if (events.length >= effectiveLimit) {
 						this.logger?.warn?.(
 							`Buzz user: getMany returned ${events.length} profiles — at the limit, so the list may be incomplete`,
@@ -2061,7 +2081,7 @@ class Buzz {
 					continue;
 				} else if (resource === 'user' && operation === 'getSelf') {
 					const selfPubkey = getPublicKey(secretKey);
-					const events = await queryEvents(this, relayUrl, secretKey, [
+					const events = await query([
 						{ authors: [selfPubkey], kinds: [KIND_PROFILE], limit: 1 },
 					]);
 					const event = newestFirst(events)[0];
