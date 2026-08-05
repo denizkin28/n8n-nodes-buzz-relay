@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#
+# Pre-push provenance gate.
+#
+# CI catches a leak AFTER it is already on GitHub, which for a secret is too
+# late — the delete-and-recreate dance is the only cure once objects exist
+# remotely. This runs before anything leaves the machine.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+# Bypass deliberately:    git push --no-verify
+
+set -uo pipefail
+
+ZERO='0000000000000000000000000000000000000000'
+root=$(git rev-parse --show-toplevel)
+check="$root/scripts/check-provenance.sh"
+
+[ -x "$check" ] || { echo "pre-push: $check missing or not executable" >&2; exit 1; }
+
+status=0
+while read -r _local_ref _local_sha _remote_ref remote_sha; do
+	[ -z "${_local_sha:-}" ] && continue
+	if [ "$remote_sha" = "$ZERO" ]; then
+		echo "pre-push: new remote branch — no base to diff against."
+		"$check" --full
+	else
+		"$check" "$remote_sha" || status=1
+	fi
+done
+
+if [ "$status" -ne 0 ]; then
+	echo ""
+	echo "pre-push: BLOCKED. Nothing was pushed."
+	echo "Override with 'git push --no-verify' only after confirming the values are synthetic."
+fi
+
+exit "$status"
