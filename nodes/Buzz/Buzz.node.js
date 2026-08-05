@@ -2115,6 +2115,7 @@ module.exports = {
 	Buzz,
 	assertSameOriginAsRelay,
 	finalizeUniqueEvent,
+	publishEvent,
 	shapeChannel,
 	shapeProfile,
 	cappedStream,

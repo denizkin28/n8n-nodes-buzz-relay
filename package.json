@@ -33,7 +33,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "for t in test/*.test.js; do node \"$t\" || exit 1; done"
+    "test": "for t in test/*.test.js; do node \"$t\" || exit 1; done",
+    "test:wire": "node test/wire-live.js"
   },
   "n8n": {
     "n8nNodesApiVersion": 1,
