@@ -152,12 +152,30 @@ need different fixes.
 ```bash
 npm install
 npm test        # 72 checks, no network or relay required
+
+# Enable the pre-push checks. Do this once per clone — git does not ship hooks
+# with a repository, so a fresh clone has no protection until you run it.
+git config core.hooksPath .githooks
 ```
+
+Requires **Node 22+** (`nostr-tools` is ESM-only; Node 18 fails with `ERR_REQUIRE_ESM`).
 
 Tests cover the SSRF guard, pagination, event-id uniqueness, response shaping, the profile merge
 and capped-stream error propagation. They deliberately do **not** cover the full HTTP download
 and n8n binary-storage path, the WebSocket lifecycle, or live relay behaviour — verify those
 against a real relay.
+
+`npm run test:wire` exercises the real wire (auth, publish, read-back, duplicate handling,
+non-member rejection, delete). It needs a relay and a private key, is configured entirely by
+environment (`BUZZ_RELAY_URL`, `BUZZ_IDENTITY_FILE`, `BUZZ_CHANNEL_NAME`), and is named
+`wire-live.js` rather than `*.test.js` so `npm test` cannot pick it up and CI never runs it.
+
+### Fixtures must be synthetic
+
+Test fixtures use invented values — repeated-byte keys, patterned UUIDs, placeholder hostnames.
+`scripts/check-provenance.sh` runs in CI and on pre-push, and flags added lines whose comments
+claim a value came from somewhere real. If it fires, reword the comment or replace the value;
+do not add an exclusion list.
 
 ## Icons
 
