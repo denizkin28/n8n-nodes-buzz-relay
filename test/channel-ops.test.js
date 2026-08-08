@@ -128,12 +128,16 @@ ok('malformed JSON content is preserved, never thrown away', () => {
 
 console.log('\nmergeProfile — kind:0 is REPLACEABLE, so an omitted field is a DELETED field');
 
-// The live profile at the time this was written. `name` is what makes @mybot resolve.
+// A synthetic profile in the shape kind:0 uses. `name` is what makes @mybot resolve, which is
+// why the merge test below cares about it surviving. Every value here is invented — including
+// the picture hash, which must stay patterned: an earlier version of this fixture carried the
+// first bytes of a REAL blob hash from the author's own relay, which no identifier scan would
+// ever have flagged because nobody knew to look for it.
 const BOT_PROFILE = {
 	name: 'mybot',
 	display_name: 'Example Bot',
 	about: 'Example automation bot.',
-	picture: 'https://relay.example/media/32b27211.jpg',
+	picture: 'https://relay.example/media/abababababababab.jpg',
 };
 
 ok('changing ONE field preserves every other field, including `name`', () => {
