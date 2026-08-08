@@ -2116,6 +2116,13 @@ module.exports = {
 	assertSameOriginAsRelay,
 	finalizeUniqueEvent,
 	publishEvent,
+	// Exported for `test/wire-live.js` only, for the same reason `publishEvent` is: the media
+	// path is the one the RELAY changed under us (authenticated reads became mandatory in
+	// relay-v0.2.1), so the test has to drive this code rather than a fetch that reproduces
+	// what it thinks this code does. A reimplementation passes while the real header builder
+	// is broken — which is precisely the class of defect this file exists to catch.
+	uploadBlob,
+	downloadBlob,
 	shapeChannel,
 	shapeProfile,
 	cappedStream,

@@ -21,6 +21,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const crypto = require('crypto');
+const stream = require('stream');
 const { generateSecretKey } = require('nostr-tools');
 
 const {
@@ -31,7 +32,23 @@ const {
 	KIND_MESSAGE,
 	KIND_CHANNEL_METADATA,
 } = require('../nodes/shared.js');
-const { publishEvent } = require('../nodes/Buzz/Buzz.node.js');
+const { publishEvent, uploadBlob, downloadBlob } = require('../nodes/Buzz/Buzz.node.js');
+
+// A 4x4 solid-colour RGBA PNG, 75 bytes, generated rather than sampled — no real file, nothing
+// copied from a message. See "Fixtures must be synthetic" in the README. It carries no EXIF and
+// no ICC profile, which the relay requires: it rejects images with metadata channels it does not
+// recognise (`422 media contains metadata or a non-canonical metadata channel`).
+//
+// It is a FIXED constant on purpose. Blossom addresses blobs by sha256, so every run uploads
+// identical bytes and reuses the SAME blob rather than creating a new one. That matters more
+// here than it normally would: the relay has NO media-delete API, so a fixture that varied per
+// run would litter it permanently — one un-removable file for every test run, forever.
+const FIXTURE_PNG = Buffer.from(
+	'89504e470d0a1a0a0000000d4948445200000004000000040806000000a9f19e7e00000012494441547' +
+	'8da63706838f01f1933902e00003a8727f14b195df60000000049454e44ae426082',
+	'hex',
+);
+const FIXTURE_PNG_SHA256 = crypto.createHash('sha256').update(FIXTURE_PNG).digest('hex');
 
 const KIND_CHANNEL_CREATE = 9007;
 const KIND_DELETE = 5;
@@ -70,12 +87,37 @@ function loadSecretKey() {
 // the same code path that runs inside n8n.
 const ctx = {
 	helpers: {
-		async httpRequest({ method, url, body, json, headers }) {
+		async httpRequest({ method, url, body, json, headers, encoding, returnFullResponse }) {
+			// A Buffer body is an upload and must go over the wire untouched. JSON.stringify on a
+			// Buffer yields `{"type":"Buffer","data":[...]}` — which the relay would happily accept
+			// as a file, store under the WRONG sha256, and every assertion downstream would then be
+			// measuring that corruption rather than the node.
+			const rawBody =
+				body === undefined ? undefined : Buffer.isBuffer(body) ? body : JSON.stringify(body);
+
 			const response = await fetch(url, {
 				method,
 				headers: { ...(json ? { 'content-type': 'application/json' } : {}), ...headers },
-				body: body === undefined ? undefined : JSON.stringify(body),
+				body: rawBody,
 			});
+
+			// `downloadBlob` asks for `encoding: 'stream'` + `returnFullResponse` and reads
+			// `response.headers` / `response.body` as a Node Readable. Reproduce that shape, and
+			// keep the non-2xx throw BEFORE it — the unauthenticated-read check depends on a 401
+			// surfacing as a thrown error with a statusCode, exactly as n8n's helper does.
+			if (returnFullResponse && encoding === 'stream') {
+				if (!response.ok) {
+					const error = new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+					error.statusCode = response.status;
+					throw error;
+				}
+				return {
+					statusCode: response.status,
+					headers: Object.fromEntries(response.headers.entries()),
+					body: stream.Readable.fromWeb(response.body),
+				};
+			}
+
 			const text = await response.text();
 			if (!response.ok) {
 				// n8n's helper throws on non-2xx; the node relies on that.
@@ -204,6 +246,63 @@ async function main() {
 			);
 		}
 		assert(refused, 'the relay ACCEPTED a write from a key that is not a member');
+	});
+
+	// ── Media ──────────────────────────────────────────────────────────────────────────────
+	// The offline suite states outright that it does not cover the HTTP download path, and until
+	// now neither did this file — so the ONE path the relay changed under us in relay-v0.2.1
+	// (`fix(media): require authenticated reads`, #4610) was covered by nothing at all. The node
+	// happened to already send the Blossom auth that became mandatory; that was luck confirmed by
+	// hand, and hand-confirmation does not survive the next upgrade.
+
+	let uploaded;
+	await ok('a file uploads and the relay returns a same-origin URL for it', async () => {
+		uploaded = await uploadBlob(ctx, RELAY_URL, secretKey, FIXTURE_PNG, 'image/png', 'wire-test.png');
+		assert.strictEqual(uploaded.sha256, FIXTURE_PNG_SHA256, 'relay stored it under a different sha256');
+		assert.strictEqual(uploaded.size, FIXTURE_PNG.length, `relay reports ${uploaded.size} bytes, sent ${FIXTURE_PNG.length}`);
+		assert.strictEqual(
+			new URL(uploaded.url).host,
+			new URL(RELAY_URL).host,
+			'upload URL points somewhere other than the relay',
+		);
+	});
+
+	await ok('an AUTHENTICATED download returns the bytes that were uploaded', async () => {
+		const { stream: body, counter } = await downloadBlob(ctx, RELAY_URL, secretKey, uploaded.url);
+		const chunks = [];
+		for await (const chunk of body) chunks.push(chunk);
+		const received = Buffer.concat(chunks);
+
+		assert.strictEqual(
+			crypto.createHash('sha256').update(received).digest('hex'),
+			FIXTURE_PNG_SHA256,
+			'round-tripped bytes do not hash to what was uploaded',
+		);
+		assert.strictEqual(counter.bytes, FIXTURE_PNG.length, 'the capped stream counted a different length');
+	});
+
+	// The negative control for media, and the reason this block exists. Its twin above proves a
+	// non-member cannot WRITE; this proves an anonymous caller cannot READ. Without it the
+	// download check passes just as happily against a relay that serves media to the whole
+	// internet — which is what this relay did until 2026-08-08.
+	//
+	// ⚠️ NOT YET SHOWN TO FAIL. It passes against relay-v0.2.1, which proves only that it runs
+	// and that this relay gates reads — not that it would CATCH a relay that does not. To earn
+	// that, point it at the previous pinned image (ghcr.io/block/buzz@sha256:48933af5…, commit
+	// 631b05c8, which served media unauthenticated) and confirm it reports
+	// "unauthenticated GET returned 200". Until someone does, treat this check as unproven:
+	// a check that has never failed has not been shown to detect anything.
+	await ok('an UNAUTHENTICATED download is REFUSED (proves media reads are gated)', async () => {
+		const response = await fetch(uploaded.url);
+		assert.notStrictEqual(
+			response.status,
+			200,
+			'unauthenticated GET returned 200 — this relay serves media to anyone who has the URL',
+		);
+		assert(
+			response.status === 401 || response.status === 403,
+			`expected 401/403 for an unauthenticated read, got ${response.status}`,
+		);
 	});
 
 	await ok('published messages can be deleted and are then gone', async () => {

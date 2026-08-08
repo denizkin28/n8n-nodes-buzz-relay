@@ -111,10 +111,25 @@ These relay, SDK and node behaviours explain results that might otherwise look s
 layer responsible is named in each case, because "the relay rejected it" and "this node refused"
 need different fixes.
 
+> Relay behaviours below were verified against [`block/buzz`](https://github.com/block/buzz) at
+> **`relay-v0.2.1`** (2026-08-08). They are observations of a moving upstream, not a specification
+> — a newer relay can change any of them, as authenticated media reads already did. Re-verify with
+> `npm run test:wire` before trusting a claim here on a build much newer than that.
+
+- **Media reads require authentication** *(relay, since `relay-v0.2.1`)*. Every media `GET` and
+  `HEAD` needs a signed Blossom authorization **and current relay membership**; the
+  unauthenticated compatibility path is gone and an anonymous request gets `401`. This is why
+  `File → Download` exists as a node operation — a plain HTTP Request node cannot fetch relay
+  media. Losing membership revokes read access; a ban alone does not, because a banned key stays
+  a member. **On a relay older than `relay-v0.2.1`, media was readable by anyone holding the
+  URL.**
 - **Uploads are effectively permanent** *(relay)*. The relay exposes **no media-delete API**, and
   no active reclamation/GC path exists — the storage layer has a delete primitive, but nothing
   production calls it. Deleting a message removes the *reference*, not the file. Treat uploading
-  to a shared community as publishing.
+  to a shared community as publishing. The authenticated-reads change above does **not** soften
+  this: every member of the community can still fetch the blob, upstream does not yet bind a blob
+  to the channel it was posted in (so leaving a private *channel* does not revoke it), and you
+  cannot know what version someone else's relay runs.
 - **Standalone audio is rejected** *(relay)*; validated MP4 **video is supported** by the relay
   (500 MB default ceiling), though this node applies its own 100 MiB cap. Images, PDF, ZIP, GZIP
   and XML are accepted; BMP, TIFF, WAV and HTML are refused.
@@ -161,14 +176,19 @@ git config core.hooksPath .githooks
 Requires **Node 22+** (`nostr-tools` is ESM-only; Node 18 fails with `ERR_REQUIRE_ESM`).
 
 Tests cover the SSRF guard, pagination, event-id uniqueness, response shaping, the profile merge
-and capped-stream error propagation. They deliberately do **not** cover the full HTTP download
-and n8n binary-storage path, the WebSocket lifecycle, or live relay behaviour — verify those
-against a real relay.
+and capped-stream error propagation. They deliberately do **not** cover the n8n binary-storage
+path, the WebSocket lifecycle, or live relay behaviour — verify those against a real relay.
 
-`npm run test:wire` exercises the real wire (auth, publish, read-back, duplicate handling,
-non-member rejection, delete). It needs a relay and a private key, is configured entirely by
-environment (`BUZZ_RELAY_URL`, `BUZZ_IDENTITY_FILE`, `BUZZ_CHANNEL_NAME`), and is named
-`wire-live.js` rather than `*.test.js` so `npm test` cannot pick it up and CI never runs it.
+`npm run test:wire` exercises the real wire: auth, publish, read-back, duplicate handling,
+non-member rejection, delete, and **media** — upload, an authenticated download checked for a
+byte-identical sha256 round-trip, and an unauthenticated download that must be refused. It needs
+a relay and a private key, is configured entirely by environment (`BUZZ_RELAY_URL`,
+`BUZZ_IDENTITY_FILE`, `BUZZ_CHANNEL_NAME`), and is named `wire-live.js` rather than `*.test.js`
+so `npm test` cannot pick it up and CI never runs it.
+
+The media fixture is a fixed 75-byte generated PNG. Because Blossom addresses blobs by sha256,
+every run re-uploads identical bytes and reuses one blob — deliberate, since the relay has no
+media-delete API and a per-run fixture would leave an un-removable file behind each time.
 
 ### Fixtures must be synthetic
 
