@@ -286,12 +286,21 @@ async function main() {
 	// download check passes just as happily against a relay that serves media to the whole
 	// internet — which is what this relay did until 2026-08-08.
 	//
-	// ⚠️ NOT YET SHOWN TO FAIL. It passes against relay-v0.2.1, which proves only that it runs
-	// and that this relay gates reads — not that it would CATCH a relay that does not. To earn
-	// that, point it at the previous pinned image (ghcr.io/block/buzz@sha256:48933af5…, commit
-	// 631b05c8, which served media unauthenticated) and confirm it reports
-	// "unauthenticated GET returned 200". Until someone does, treat this check as unproven:
-	// a check that has never failed has not been shown to detect anything.
+	// ⚠️ NOT YET SHOWN TO FAIL, and the cheap way to show it is GONE. It passes against
+	// relay-v0.2.1, which proves it runs and that this relay gates reads — not that it would
+	// CATCH a relay that does not.
+	//
+	// The obvious validation — re-pin the previous image (48933af5, commit 631b05c8, which did
+	// serve media unauthenticated) and watch this report "unauthenticated GET returned 200" —
+	// was tried on 2026-08-08 and is IMPOSSIBLE against an upgraded database. relay-v0.2.1
+	// applies migrations 27/28, and sqlx then refuses to start the older binary at all:
+	// "migration 27 was previously applied but is missing in the resolved migrations". The old
+	// relay crash-loops instead of serving, so the test gets 502s rather than a 200.
+	//
+	// Validating it now needs the old binary against a PRE-UPGRADE database: restore a dump
+	// taken before the upgrade into a scratch Postgres and point a throwaway relay at it.
+	// Until someone does that, treat this check as unproven — a check that has never failed
+	// has not been shown to detect anything.
 	await ok('an UNAUTHENTICATED download is REFUSED (proves media reads are gated)', async () => {
 		const response = await fetch(uploaded.url);
 		assert.notStrictEqual(
