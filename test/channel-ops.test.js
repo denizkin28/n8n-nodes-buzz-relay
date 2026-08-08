@@ -131,8 +131,8 @@ console.log('\nmergeProfile — kind:0 is REPLACEABLE, so an omitted field is a 
 // A synthetic profile in the shape kind:0 uses. `name` is what makes @mybot resolve, which is
 // why the merge test below cares about it surviving. Every value here is invented — including
 // the picture hash, which must stay patterned: an earlier version of this fixture carried the
-// first bytes of a REAL blob hash from the author's own relay, which no identifier scan would
-// ever have flagged because nobody knew to look for it.
+// leading bytes of a genuine blob hash from the author's own relay, which no identifier scan
+// would ever have flagged because nobody knew to look for those characters.
 const BOT_PROFILE = {
 	name: 'mybot',
 	display_name: 'Example Bot',

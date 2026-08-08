@@ -34,10 +34,11 @@ const {
 } = require('../nodes/shared.js');
 const { publishEvent, uploadBlob, downloadBlob } = require('../nodes/Buzz/Buzz.node.js');
 
-// A 4x4 solid-colour RGBA PNG, 75 bytes, generated rather than sampled — no real file, nothing
-// copied from a message. See "Fixtures must be synthetic" in the README. It carries no EXIF and
-// no ICC profile, which the relay requires: it rejects images with metadata channels it does not
-// recognise (`422 media contains metadata or a non-canonical metadata channel`).
+// A 4x4 solid-colour RGBA PNG, 75 bytes, constructed byte by byte rather than sampled — it is
+// not derived from any file that ever sat on a relay. See "Fixtures must be synthetic" in the
+// README. It carries no EXIF and no ICC profile, which the relay requires: it rejects images
+// with metadata channels it does not recognise (`422 media contains metadata or a non-canonical
+// metadata channel`).
 //
 // It is a FIXED constant on purpose. Blossom addresses blobs by sha256, so every run uploads
 // identical bytes and reuses the SAME blob rather than creating a new one. That matters more
